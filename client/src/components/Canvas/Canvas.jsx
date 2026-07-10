@@ -18,6 +18,7 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
   const isPanning = useRef(false)
   const lastPos = useRef(null)
   const lastCursorEmit = useRef(0)
+  const lastTouchDist = useRef(null) // for pinch zoom
 
   const {
     tool, color, stickyColor, elements, currentElement,
@@ -54,7 +55,6 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
         socket?.emit('stroke-cancel')
         setSelectedId(null)
       }
-      // Delete selected element
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
         e.preventDefault()
         removeElement(selectedId)
@@ -65,7 +65,7 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
     return () => window.removeEventListener('keydown', onKey)
   }, [undo, redo, setTool, socket, selectedId, removeElement, setSelectedId])
 
-  // ── Zoom ──────────────────────────────────────────────────
+  // ── Zoom (mouse wheel) ────────────────────────────────────
   const handleWheel = useCallback((e) => {
     e.evt.preventDefault()
     const stage = stageRef.current
@@ -98,17 +98,16 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
     setSelectedId(id)
   }, [setSelectedId])
 
-  // ── Drag / resize → sync via Yjs ──────────────────────────
+  // ── Drag / resize → sync via Yjs ─────────────────────────
   const handleTransformEnd = useCallback((id, changes) => {
     updateElement(id, changes)
   }, [updateElement])
 
-  // ── Click on empty canvas — deselect, place text, place sticky ─
+  // ── Click on empty canvas ─────────────────────────────────
   const handleStageClick = useCallback((e) => {
     if (readOnly) return
     const clickedOnEmpty = e.target === e.target.getStage()
 
-    // Deselect when clicking empty canvas with select tool
     if (tool === 'select' && clickedOnEmpty) {
       setSelectedId(null)
       return
@@ -135,21 +134,17 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
       const newSticky = {
         id: crypto.randomUUID(),
         type: 'sticky',
-        x: pos.x,
-        y: pos.y,
-        width: 160,
-        height: 120,
-        text: '',
-        bgColor: stickyColor,
+        x: pos.x, y: pos.y,
+        width: 160, height: 120,
+        text: '', bgColor: stickyColor,
       }
       addElement(newSticky)
-      // Open edit immediately on the newly created sticky
       openStickyEdit(newSticky)
       return
     }
   }, [tool, stickyColor, addElement, setSelectedId])
 
-  // ── Inline textarea for text tool (create or re-edit) ─────
+  // ── Text input ────────────────────────────────────────────
   const openTextInput = useCallback((pos, existingEl = null) => {
     const stage = stageRef.current
     const scale = stage.scaleX()
@@ -184,12 +179,8 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
       finished = true
       const text = textarea.value.trim()
       if (existingEl) {
-        // Re-editing — update in place
-        if (text) {
-          updateElement(existingEl.id, { text })
-        } else {
-          removeElement(existingEl.id) // empty text → delete
-        }
+        if (text) updateElement(existingEl.id, { text })
+        else removeElement(existingEl.id)
       } else if (text) {
         addElement({
           id: crypto.randomUUID(),
@@ -217,7 +208,7 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
     textarea.addEventListener('blur', finish)
   }, [addElement, updateElement, removeElement, socket])
 
-  // ── Inline textarea for sticky note (create or re-edit) ───
+  // ── Sticky edit ───────────────────────────────────────────
   const openStickyEdit = useCallback((el) => {
     const stage = stageRef.current
     const scale = stage.scaleX()
@@ -226,7 +217,6 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
     const stageBox = stage.container().getBoundingClientRect()
     const width = el.width || 160
     const height = el.height || 120
-
     textarea.value = el.text || ''
     textarea.style.cssText = `
       position: fixed;
@@ -248,13 +238,11 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
     `
     textarea.focus()
     textarea.select()
-
     let finished = false
     const finish = () => {
       if (finished) return
       finished = true
-      const text = textarea.value.trim()
-      updateElement(el.id, { text })
+      updateElement(el.id, { text: textarea.value.trim() })
       if (textarea.parentNode) textarea.parentNode.removeChild(textarea)
     }
     textarea.addEventListener('blur', finish)
@@ -266,27 +254,20 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
     })
   }, [updateElement])
 
-  // ── Double-click to re-edit sticky/text ───────────────────
+  // ── Double-click to edit ──────────────────────────────────
   const handleDoubleClick = useCallback((el) => {
-    if (el.type === 'sticky') {
-      openStickyEdit(el)
-    }
-    if (el.type === 'text') {
-      openTextInput({ x: el.x, y: el.y }, el)
-    }
-  }, [openStickyEdit])
+    if (el.type === 'sticky') openStickyEdit(el)
+    if (el.type === 'text') openTextInput({ x: el.x, y: el.y }, el)
+  }, [openStickyEdit, openTextInput])
 
-  // ── Pan (middle mouse, or left-click+drag on empty canvas with select tool) ─
+  // ── Mouse down ────────────────────────────────────────────
   const handleStageMouseDown = useCallback((e) => {
     const clickedOnEmpty = e.target === e.target.getStage()
-
     if (e.evt.button === 1) {
       isPanning.current = true
       lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
       return
     }
-
-    // Viewers can pan but never draw
     if (readOnly) {
       if (clickedOnEmpty) {
         isPanning.current = true
@@ -294,13 +275,11 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
       }
       return
     }
-
     if (tool === 'select' && clickedOnEmpty) {
       isPanning.current = true
       lastPos.current = { x: e.evt.clientX, y: e.evt.clientY }
       return
     }
-
     if (tool === 'select' || tool === 'text' || tool === 'sticky') return
     handleMouseDown(e)
   }, [tool, handleMouseDown, readOnly])
@@ -321,7 +300,6 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
         }
       }
     }
-
     if (isPanning.current && lastPos.current) {
       const dx = e.evt.clientX - lastPos.current.x
       const dy = e.evt.clientY - lastPos.current.y
@@ -341,6 +319,89 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
     handleMouseUp(e)
   }, [handleMouseUp])
 
+  // ── Touch handlers ────────────────────────────────────────
+  const handleTouchStart = useCallback((e) => {
+    e.evt.preventDefault()
+    const touches = e.evt.touches
+
+    if (touches.length === 2) {
+      // Two fingers — prepare for pinch zoom, cancel drawing
+      isPanning.current = false
+      lastTouchDist.current = Math.hypot(
+        touches[0].clientX - touches[1].clientX,
+        touches[0].clientY - touches[1].clientY
+      )
+      socket?.emit('stroke-cancel')
+      return
+    }
+
+    // Single finger — treat like mouse down
+    const touch = touches[0]
+    handleStageMouseDown({
+      ...e,
+      evt: {
+        ...e.evt,
+        clientX: touch.clientX,
+        clientY: touch.clientY,
+        button: 0,
+        buttons: 1,
+      },
+      target: e.target,
+    })
+  }, [handleStageMouseDown, socket])
+
+  const handleTouchMove = useCallback((e) => {
+    e.evt.preventDefault()
+    const touches = e.evt.touches
+
+    if (touches.length === 2 && lastTouchDist.current !== null) {
+      // Pinch zoom
+      const stage = stageRef.current
+      const newDist = Math.hypot(
+        touches[0].clientX - touches[1].clientX,
+        touches[0].clientY - touches[1].clientY
+      )
+      const oldScale = stage.scaleX()
+      const scaleBy = newDist / lastTouchDist.current
+      const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, oldScale * scaleBy))
+
+      // Zoom toward midpoint of two fingers
+      const midX = (touches[0].clientX + touches[1].clientX) / 2
+      const midY = (touches[0].clientY + touches[1].clientY) / 2
+      const mousePointTo = {
+        x: (midX - stage.x()) / oldScale,
+        y: (midY - stage.y()) / oldScale,
+      }
+      setStageScale(newScale)
+      setStagePos({
+        x: midX - mousePointTo.x * newScale,
+        y: midY - mousePointTo.y * newScale,
+      })
+      lastTouchDist.current = newDist
+      return
+    }
+
+    if (touches.length === 1) {
+      const touch = touches[0]
+      handleStageMouseMove({
+        ...e,
+        evt: {
+          ...e.evt,
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+          buttons: 1,
+        },
+        target: e.target,
+      })
+    }
+  }, [handleStageMouseMove, setStageScale, setStagePos])
+
+  const handleTouchEnd = useCallback((e) => {
+    e.evt.preventDefault()
+    lastTouchDist.current = null
+    handleStageMouseUp(e)
+  }, [handleStageMouseUp])
+
   const cursorMap = {
     eraser: 'cell',
     select: 'grab',
@@ -350,7 +411,7 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
   const cursor = cursorMap[tool] || 'crosshair'
 
   return (
-    <div className="relative w-full h-full overflow-hidden" style={{ cursor }}>
+    <div className="relative w-full h-full overflow-hidden" style={{ cursor, touchAction: 'none' }}>
       <Stage
         ref={stageRef}
         width={window.innerWidth}
@@ -364,9 +425,11 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
         onMouseMove={handleStageMouseMove}
         onMouseUp={handleStageMouseUp}
         onClick={handleStageClick}
-        style={{ background: '#fafaf8' }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        style={{ background: '#fafaf8', touchAction: 'none' }}
       >
-        {/* Layer 1 — committed elements (Yjs synced) */}
         <Layer>
           <ElementRenderer
             elements={elements}
@@ -384,11 +447,8 @@ export default function Canvas({ updateCursor, socket, userColor, readOnly, stag
             onTransformEnd={handleTransformEnd}
           />
         </Layer>
-
-        {/* Layer 2 — ghost strokes from other users (ephemeral) */}
         <GhostLayer />
       </Stage>
-
       <TextEditingIndicator stagePos={stagePos} stageScale={stageScale} />
     </div>
   )
